@@ -11,7 +11,9 @@ interface IBuildNFT {
 /// @notice Receives the 50% mint fee slice (0.005 ETH) and accrues it to component owners.
 /// Owner is determined at time of mint via BuildNFT.ownerOf(tokenId).
 contract BuildUsageFeeRegistry is Ownable, ReentrancyGuard {
-    event CompositionFeeAccrued(uint256 indexed tokenId, address indexed owner, uint256 count, uint256 ethAmount);
+    event CompositionFeeAccrued(
+        uint256 indexed tokenId, address indexed owner, uint256 count, uint256 ethAmount
+    );
     event FeesClaimed(address indexed claimer, uint256 amount);
     event BuildNFTSet(address indexed buildNFT);
     event ProtocolTreasurySet(address indexed protocolTreasury);
@@ -42,7 +44,10 @@ contract BuildUsageFeeRegistry is Ownable, ReentrancyGuard {
         emit ProtocolTreasurySet(protocolTreasury_);
     }
 
-    function accrueFromComposition(uint256[] calldata tokenIds, uint256[] calldata counts) external payable {
+    function accrueFromComposition(uint256[] calldata tokenIds, uint256[] calldata counts)
+        external
+        payable
+    {
         require(msg.sender == buildNFT, "only BuildNFT");
         require(msg.value == OWNER_SLICE_PER_MINT, "bad msg.value");
 
@@ -93,7 +98,7 @@ contract BuildUsageFeeRegistry is Ownable, ReentrancyGuard {
 
         accruedETH[msg.sender] = 0;
 
-        (bool ok, ) = msg.sender.call{value: amount}("");
+        (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "ETH transfer failed");
 
         emit FeesClaimed(msg.sender, amount);
