@@ -2,7 +2,9 @@
 pragma solidity ^0.8.24;
 
 import {ERC1155} from "openzeppelin-contracts/contracts/token/ERC1155/ERC1155.sol";
-import {ERC1155Supply} from "openzeppelin-contracts/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
+import {
+    ERC1155Supply
+} from "openzeppelin-contracts/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
 import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
 
 contract LicenseNFT is ERC1155, ERC1155Supply, Ownable {
@@ -54,7 +56,10 @@ contract LicenseNFT is ERC1155, ERC1155Supply, Ownable {
     }
 
     // NEW: batch mint helper (registry-only)
-    function mintBatch(address to, uint256[] calldata ids, uint256[] calldata qtys) external onlyRegistry {
+    function mintBatch(address to, uint256[] calldata ids, uint256[] calldata qtys)
+        external
+        onlyRegistry
+    {
         require(ids.length == qtys.length, "len");
         for (uint256 i = 0; i < ids.length; i++) {
             uint256 id = ids[i];
@@ -79,12 +84,10 @@ contract LicenseNFT is ERC1155, ERC1155Supply, Ownable {
         emit BaseURISet(newUri);
     }
 
-    function _update(
-        address from,
-        address to,
-        uint256[] memory ids,
-        uint256[] memory values
-    ) internal override(ERC1155, ERC1155Supply) {
+    function _update(address from, address to, uint256[] memory ids, uint256[] memory values)
+        internal
+        override(ERC1155, ERC1155Supply)
+    {
         super._update(from, to, ids, values);
     }
 }

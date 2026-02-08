@@ -27,3 +27,14 @@ Current state:
 Open questions:
 - LicenseNFT (ERC1155) integration deferred
 - Future mint fee may increase due to license purchases
+
+## Metadata Schema (IPFS folder-based)
+Required JSON fields: `name`, `description`, `image`, `external_url`, `attributes`.
+
+Truth anchors (must reflect on-chain):
+- `geometryHash`
+- `kind`
+- `mass`
+- `density`
+- `specKey` (kind==0 only)
+- `componentsHash` (optional)

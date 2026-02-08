@@ -1,0 +1,32 @@
+{
+  "name": "ETHBLOX #64",
+  "description": "ETHBLOX build/brick",
+  "image": "ipfs://CID/images/64.png",
+  "external_url": "https://ethblox.xyz",
+  "attributes": [
+    {
+      "trait_type": "kind",
+      "value": 1
+    },
+    {
+      "trait_type": "mass",
+      "value": 1
+    },
+    {
+      "trait_type": "density",
+      "value": 1
+    },
+    {
+      "trait_type": "geometryHash",
+      "value": "0x"
+    },
+    {
+      "trait_type": "specKey",
+      "value": ""
+    },
+    {
+      "trait_type": "componentsHash",
+      "value": ""
+    }
+  ]
+}

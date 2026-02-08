@@ -11,8 +11,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// - Anyone can call distribute()
 /// - Optional: forward all funds to a new distributor (no proxy upgrade)
 /// - Optional: freeze rules forever for credibility
-interface IBuildNFTOwnerOf {
+interface IBuildNFTView {
     function ownerOf(uint256 tokenId) external view returns (address);
+    function lockedBloxOf(uint256 tokenId) external view returns (uint256);
+    function isActive(uint256 tokenId) external view returns (bool);
 }
 
 contract Distributor is ReentrancyGuard {
@@ -163,8 +165,11 @@ contract Distributor is ReentrancyGuard {
         require(buildIds.length <= 32, "too many");
 
         uint256 len = buildIds.length;
-        uint256 totalCount;
+        uint256 totalWeight;
+        uint256 liveWeight;
         uint256 lastIndex = len - 1;
+        uint256[] memory weights = new uint256[](len);
+        bool[] memory burned = new bool[](len);
 
         for (uint256 i = 0; i < len; i++) {
             if (i > 0) {
@@ -173,29 +178,51 @@ contract Distributor is ReentrancyGuard {
             require(counts[i] > 0, "count=0");
 
             uint256 buildId = buildIds[i];
+            if (!IBuildNFTView(buildNFT).isActive(buildId)) {
+                burned[i] = true;
+                weights[i] = 1;
+                totalWeight += 1;
+                continue;
+            }
+
             if (!hasUsed[buildId][payer]) {
                 hasUsed[buildId][payer] = true;
                 uniqueUsers[buildId] += 1;
             }
-            totalCount += counts[i];
+
+            uint256 lockedBlox = IBuildNFTView(buildNFT).lockedBloxOf(buildId);
+            uint256 baseWeight = lockedBlox / 1e12;
+            if (baseWeight == 0) baseWeight = 1;
+            uint256 weight = baseWeight * (1 + uniqueUsers[buildId]);
+            weights[i] = weight;
+            totalWeight += weight;
+            liveWeight += weight;
         }
 
+        if (liveWeight == 0) {
+            ethOwed[protocolTreasury] += msg.value;
+            emit UsageAccrued(0, payer, protocolTreasury, msg.value, false);
+            return;
+        }
         uint256 remaining = msg.value;
 
         for (uint256 i = 0; i < len; i++) {
             uint256 buildId = buildIds[i];
-            address ownerOfBuild = IBuildNFTOwnerOf(buildNFT).ownerOf(buildId);
-            uint256 amount = (msg.value * counts[i]) / totalCount;
+            uint256 amount = (msg.value * weights[i]) / totalWeight;
             if (i == lastIndex) {
                 amount = remaining;
             } else {
                 remaining -= amount;
             }
 
-            bool selfBlocked = ownerOfBuild == payer;
-            address recipient = selfBlocked ? protocolTreasury : ownerOfBuild;
-            ethOwed[recipient] += amount;
-            emit UsageAccrued(buildId, payer, ownerOfBuild, amount, selfBlocked);
+            if (burned[i]) {
+                ethOwed[protocolTreasury] += amount;
+                emit UsageAccrued(buildId, payer, address(0), amount, false);
+            } else {
+                address ownerOfBuild = IBuildNFTView(buildNFT).ownerOf(buildId);
+                ethOwed[ownerOfBuild] += amount;
+                emit UsageAccrued(buildId, payer, ownerOfBuild, amount, false);
+            }
         }
     }
 

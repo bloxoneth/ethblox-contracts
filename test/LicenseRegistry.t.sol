@@ -10,6 +10,7 @@ import {LicenseNFT} from "src/LicenseNFT.sol";
 contract MockBuildNFT {
     mapping(uint256 => address) internal _ownerOf;
     mapping(uint256 => bytes32) internal _geometryOf;
+    mapping(uint256 => uint256) internal _massOf;
 
     function setOwner(uint256 tokenId, address owner) external {
         _ownerOf[tokenId] = owner;
@@ -17,6 +18,10 @@ contract MockBuildNFT {
 
     function setGeometry(uint256 tokenId, bytes32 g) external {
         _geometryOf[tokenId] = g;
+    }
+
+    function setMass(uint256 tokenId, uint256 m) external {
+        _massOf[tokenId] = m;
     }
 
     function ownerOf(uint256 tokenId) external view returns (address) {
@@ -29,6 +34,14 @@ contract MockBuildNFT {
         // mirror your real BuildNFT pattern: geometryOf for non-existent tokens is fine
         // as long as ownerOf is the authoritative existence check.
         return _geometryOf[tokenId];
+    }
+
+    function isActive(uint256 tokenId) external view returns (bool) {
+        return _ownerOf[tokenId] != address(0);
+    }
+
+    function massOf(uint256 tokenId) external view returns (uint256) {
+        return _massOf[tokenId];
     }
 }
 
@@ -46,11 +59,13 @@ contract LicenseRegistryTest is Test {
 
     uint256 private buildId = 1;
     bytes32 private geo = keccak256("geo-1");
+    uint256 private mass = 100;
 
     function setUp() public {
         build = new MockBuildNFT();
         build.setOwner(buildId, buildOwner);
         build.setGeometry(buildId, geo);
+        build.setMass(buildId, mass);
 
         licenseNFT = new LicenseNFT("ipfs://base/{id}.json");
 
@@ -88,65 +103,77 @@ contract LicenseRegistryTest is Test {
 
     function testRegisterBuildHappyPath() public {
         vm.prank(buildOwner);
-        registry.registerBuild(buildId, geo, 1000, 0.01 ether, 0.001 ether);
+        registry.registerBuild(buildId, geo);
 
         uint256 licenseId = registry.licenseIdForBuild(buildId);
         assertEq(licenseId, 1);
 
-        (uint256 startPrice, uint256 step, uint256 maxSupply) = registry.pricingForLicense(licenseId);
-        assertEq(startPrice, 0.01 ether);
-        assertEq(step, 0.001 ether);
-        assertEq(maxSupply, 1000);
+        (uint256 startPrice, uint256 step, uint256 maxSupply, uint256 maxPrice) =
+            registry.pricingForLicense(licenseId);
+        assertEq(maxSupply, 10_000_000 / mass);
+        assertTrue(startPrice > 0);
+        assertTrue(maxPrice >= startPrice);
 
         // LicenseNFT maxSupply should be set
-        assertEq(licenseNFT.maxSupply(licenseId), 1000);
+        assertEq(licenseNFT.maxSupply(licenseId), 10_000_000 / mass);
     }
 
     function testRegisterBuildRevertsIfNotOwner() public {
         vm.prank(buyer);
         vm.expectRevert(bytes("not owner"));
-        registry.registerBuild(buildId, geo, 1000, 0.01 ether, 0.001 ether);
+        registry.registerBuild(buildId, geo);
     }
 
     function testRegisterBuildRevertsOnGeometryMismatch() public {
         vm.prank(buildOwner);
         vm.expectRevert(bytes("geometry mismatch"));
-        registry.registerBuild(buildId, keccak256("wrong"), 1000, 0.01 ether, 0.001 ether);
+        registry.registerBuild(buildId, keccak256("wrong"));
     }
 
     function testRegisterBuildRevertsIfAlreadyRegistered() public {
         vm.prank(buildOwner);
-        registry.registerBuild(buildId, geo, 1000, 0.01 ether, 0.001 ether);
+        registry.registerBuild(buildId, geo);
 
         vm.prank(buildOwner);
         vm.expectRevert(bytes("already registered"));
-        registry.registerBuild(buildId, geo, 1000, 0.01 ether, 0.001 ether);
+        registry.registerBuild(buildId, geo);
     }
 
-    function testRegisterBuildRevertsOnZeroMax() public {
+    function testRegisterBuildRevertsIfBurned() public {
+        build.setOwner(buildId, address(0));
+
         vm.prank(buildOwner);
-        vm.expectRevert(bytes("max=0"));
-        registry.registerBuild(buildId, geo, 0, 0.01 ether, 0.001 ether);
+        vm.expectRevert(bytes("inactive build"));
+        registry.registerBuild(buildId, geo);
+    }
+
+    function testRegisterBuildRevertsOnZeroMass() public {
+        build.setMass(buildId, 0);
+        vm.prank(buildOwner);
+        vm.expectRevert(bytes("mass=0"));
+        registry.registerBuild(buildId, geo);
     }
 
     // ---------- quote / mintLicenseForBuild ----------
 
     function testQuoteMatchesArithmeticSeries() public {
         vm.prank(buildOwner);
-        registry.registerBuild(buildId, geo, 1000, 0.01 ether, 0.001 ether);
+        registry.registerBuild(buildId, geo);
 
-        // qty=3 -> a + (a+d) + (a+2d) = 0.01 + 0.011 + 0.012 = 0.033 ether
+        uint256 licenseId = registry.licenseIdForBuild(buildId);
+        (uint256 startPrice, uint256 step,,) = registry.pricingForLicense(licenseId);
+
         uint256 q = registry.quote(buildId, 3);
-        assertEq(q, 0.033 ether);
+        uint256 expected = ((startPrice * 2 + (2 * step)) * 3) / 2;
+        assertEq(q, expected);
     }
 
     function testMintLicenseForBuildMintsAndForwardsETH() public {
         vm.prank(buildOwner);
-        registry.registerBuild(buildId, geo, 1000, 0.01 ether, 0.001 ether);
+        registry.registerBuild(buildId, geo);
 
         uint256 licenseId = registry.licenseIdForBuild(buildId);
-        uint256 price = registry.quote(buildId, 2); // 0.01 + 0.011 = 0.021
-        assertEq(price, 0.021 ether);
+        uint256 price = registry.quote(buildId, 2);
 
         uint256 treasuryBefore = treasury.balance;
 
@@ -162,7 +189,7 @@ contract LicenseRegistryTest is Test {
 
     function testMintLicenseForBuildRevertsOnBadPrice() public {
         vm.prank(buildOwner);
-        registry.registerBuild(buildId, geo, 1000, 0.01 ether, 0.001 ether);
+        registry.registerBuild(buildId, geo);
 
         uint256 price = registry.quote(buildId, 2);
 
@@ -175,6 +202,18 @@ contract LicenseRegistryTest is Test {
         vm.prank(buyer);
         vm.expectRevert(bytes("not registered"));
         registry.mintLicenseForBuild{value: 1 ether}(buildId, 1);
+    }
+
+    function testMintLicenseForBuildRevertsIfBurned() public {
+        vm.prank(buildOwner);
+        registry.registerBuild(buildId, geo);
+
+        build.setOwner(buildId, address(0));
+
+        uint256 price = registry.quote(buildId, 1);
+        vm.prank(buyer);
+        vm.expectRevert(bytes("inactive build"));
+        registry.mintLicenseForBuild{value: price}(buildId, 1);
     }
 
     function testQuoteRevertsIfNotRegistered() public {
