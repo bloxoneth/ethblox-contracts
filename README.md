@@ -15,6 +15,51 @@ https://book.getfoundry.sh/
 
 ## Usage
 
+### ETHBLOX Environment Split
+
+- Local development runs on Anvil (`31337`)
+- Deployments run on Base Sepolia
+
+Setup:
+
+```shell
+cp .env.example .env
+```
+
+Local:
+
+```shell
+npm run local:up
+npm run test
+npm run sim:local
+```
+
+Persistent local state:
+
+```shell
+npm run local:status
+npm run local:stop
+```
+
+`local:up` starts Anvil with persisted state at `.anvil/state.json` and only deploys BLOX + protocol contracts if they are missing on the current local chain. It writes deployment addresses to `deployments/anvil.contracts.json`.
+
+Sepolia deploy:
+
+```shell
+npm run deploy:sepolia
+```
+
+### Go-Live Checklist (Contracts)
+
+- Remove all local-only deployment assumptions (Anvil default keys, local treasury/receiver).
+- Confirm production BLOX address and treasury/liquidity receiver env values are final.
+- Re-run full test suite and invariant/economic tests against release commit.
+- Freeze and verify constructor params used in deployment script before broadcasting.
+- Verify deployed addresses and ABIs are exported to app config exactly once.
+- Lock down owner/admin permissions and document any retained emergency controls.
+- Archive deployment artifacts (tx hashes, bytecode, addresses) for audit trail.
+- Do one final dry run on testnet with production-like env before mainnet deploy.
+
 ### Build
 
 ```shell

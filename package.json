@@ -8,7 +8,16 @@
     "test": "test"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "forge test",
+    "anvil": "anvil --host 127.0.0.1 --port 8545 --chain-id 31337",
+    "local:up": "node scripts/local-dev.mjs up",
+    "local:status": "node scripts/local-dev.mjs status",
+    "local:stop": "node scripts/local-dev.mjs stop",
+    "sim:protocol": "node scripts/protocol-sim.mjs",
+    "sim:bw": "node scripts/bw-sim.mjs",
+    "sim:emissions": "node scripts/emissions-sim.mjs",
+    "sim:local": "node scripts/protocol-sim.mjs --rpc http://127.0.0.1:8545 --no-anvil",
+    "deploy:sepolia": "bash scripts/deploy-sepolia.sh"
   },
   "keywords": [],
   "author": "",

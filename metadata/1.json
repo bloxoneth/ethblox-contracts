@@ -1,12 +1,12 @@
 {
   "name": "ETHBLOX #1",
   "description": "ETHBLOX build/brick",
-  "image": "ipfs://CID/images/1.png",
-  "external_url": "https://ethblox.xyz",
+  "image": "ipfs://bafybeibnk4kq7mesrs7wtwi2ypwlnxhazoqkwgoycol55n64tqseox2q2a/1.png",
+  "external_url": "https://ethblox.art",
   "attributes": [
     {
       "trait_type": "kind",
-      "value": 1
+      "value": 0
     },
     {
       "trait_type": "mass",
@@ -18,11 +18,11 @@
     },
     {
       "trait_type": "geometryHash",
-      "value": "0x"
+      "value": "0xeb38ea055d70d348cf22350be92b9fd5bd2e313dc6f092d109a07a405aac1a35"
     },
     {
       "trait_type": "specKey",
-      "value": ""
+      "value": "0xe8199ea775c72f62b435fd995b25b6dfb33dd9ab63990f53e397526e2bd97c82"
     },
     {
       "trait_type": "componentsHash",
