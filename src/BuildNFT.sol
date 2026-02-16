@@ -93,7 +93,7 @@ contract BuildNFT is ERC721, Ownable, ReentrancyGuard, ERC1155Holder, EIP712 {
     // Constants
     // ==============================
 
-    uint256 public constant FEE_PER_MINT = 0.01 ether;
+    uint256 public constant FEE_PER_MINT = 0.0001 ether;
     uint256 public constant BLOX_PER_MASS = 1e18;
     uint256 public constant RESERVATION_MAX_TTL = 7 days;
 
