@@ -53,6 +53,7 @@ npm run deploy:sepolia
 
 - Remove all local-only deployment assumptions (Anvil default keys, local treasury/receiver).
 - Confirm production BLOX address and treasury/liquidity receiver env values are final.
+- Reset `BuildNFT.FEE_PER_MINT` from temporary test value (`0.0001 ETH`) to production value before final deploy.
 - Re-run full test suite and invariant/economic tests against release commit.
 - Freeze and verify constructor params used in deployment script before broadcasting.
 - Verify deployed addresses and ABIs are exported to app config exactly once.
