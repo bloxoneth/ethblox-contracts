@@ -14,7 +14,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 interface IBuildNFTView {
     function ownerOf(uint256 tokenId) external view returns (address);
     function lockedBloxOf(uint256 tokenId) external view returns (uint256);
-    function isActive(uint256 tokenId) external view returns (bool);
+    function bwAnchorOf(uint256 tokenId) external view returns (uint256);
 }
 
 contract Distributor is ReentrancyGuard {
@@ -46,8 +46,15 @@ contract Distributor is ReentrancyGuard {
     // --- usage fee registry ---
     address public buildNFT;
     address public protocolTreasury;
+    mapping(uint256 => int256) public bwScore;
     mapping(uint256 => mapping(address => bool)) public hasUsed;
+    mapping(uint256 => mapping(address => bool)) public hasBuiltWith;
     mapping(uint256 => uint256) public uniqueUsers;
+    mapping(uint256 => uint256) public uniqueBuilders;
+    mapping(uint256 => uint256) public uses;
+    mapping(uint256 => uint256) public lastUsedAt;
+    mapping(uint256 => uint256) public lastNonOwnerUseAt;
+    mapping(uint256 => uint256) public firstSeenAt;
     mapping(address => uint256) public ethOwed;
 
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
@@ -154,7 +161,9 @@ contract Distributor is ReentrancyGuard {
     function accrueFromComposition(
         uint256[] calldata buildIds,
         uint256[] calldata counts,
-        address payer
+        address payer,
+        uint256 buildMass,
+        uint256 buildDensity
     ) external payable nonReentrant {
         require(msg.value > 0, "no fee");
         require(msg.sender == buildNFT, "only buildNFT");
@@ -163,67 +172,200 @@ contract Distributor is ReentrancyGuard {
         require(buildIds.length == counts.length, "len");
         require(buildIds.length > 0, "no components");
         require(buildIds.length <= 32, "too many");
+        require(buildDensity > 0, "density=0");
 
+        uint256 totalCount = _validateCounts(buildIds, counts);
+        uint256 complexity = _complexity(buildMass, buildDensity, buildIds.length, totalCount);
+
+        (uint256[] memory weights, address[] memory owners, uint256 totalWeight, bool hasLive) =
+            _computeWeights(buildIds, payer, complexity);
+
+        if (!hasLive) {
+            ethOwed[protocolTreasury] += msg.value;
+            emit UsageAccrued(0, payer, protocolTreasury, msg.value, false);
+            return;
+        }
+
+        _distribute(buildIds, weights, owners, totalWeight, payer, msg.value);
+    }
+
+    function _complexity(
+        uint256 buildMass,
+        uint256 buildDensity,
+        uint256 uniqueTypes,
+        uint256 totalCount
+    ) internal pure returns (uint256) {
+        if (uniqueTypes == 0) return 0;
+        uint256 scaledMass = buildMass;
+        if (scaledMass > type(uint256).max / 1e18) {
+            scaledMass = type(uint256).max / 1e18;
+        }
+        uint256 base = (scaledMass * 1e18) / buildDensity;
+        uint256 multiplier = uniqueTypes + totalCount;
+        if (base > type(uint256).max / multiplier) {
+            return type(uint256).max;
+        }
+        return base * multiplier;
+    }
+
+    function _bwDelta(uint256 buildId, uint256 lockedBlox, uint256 complexity)
+        internal
+        view
+        returns (int256)
+    {
+        uint256 lockedTerm = lockedBlox / 1e12;
+        if (lockedTerm == 0) lockedTerm = 1;
+        uint256 adoptionTerm = uniqueUsers[buildId] + uniqueBuilders[buildId];
+        uint256 usesTerm = uses[buildId] / 10;
+        uint256 complexityTerm = complexity / 1e24;
+
+        uint256 ageTerm;
+        uint256 seenAt = firstSeenAt[buildId];
+        if (seenAt != 0) {
+            ageTerm = ((block.timestamp - seenAt) / 1 days) / 28;
+        }
+
+        uint256 utilityTerm;
+        uint256 lastNonOwner = lastNonOwnerUseAt[buildId];
+        if (lastNonOwner != 0) {
+            uint256 monthsSince = (block.timestamp - lastNonOwner) / 30 days;
+            utilityTerm = monthsSince == 0 ? 1 : (1 / monthsSince);
+        }
+
+        uint256 decay;
+        uint256 lastUsed = lastUsedAt[buildId];
+        if (lastUsed != 0) {
+            uint256 daysSince = (block.timestamp - lastUsed) / 1 days;
+            if (daysSince > 90) {
+                decay = (daysSince - 90) / 7;
+            }
+        }
+
+        int256 positive = int256(
+            lockedTerm + adoptionTerm + usesTerm + complexityTerm + ageTerm + utilityTerm
+        );
+        return positive - int256(decay);
+    }
+
+    function _weightFromScore(int256 score) internal pure returns (uint256) {
+        int256 val = score + 1;
+        if (val < 1) val = 1;
+        return uint256(val);
+    }
+
+    function _computeWeights(
+        uint256[] calldata buildIds,
+        address payer,
+        uint256 complexity
+    )
+        internal
+        returns (uint256[] memory weights, address[] memory owners, uint256 totalWeight, bool hasLive)
+    {
         uint256 len = buildIds.length;
-        uint256 totalWeight;
-        uint256 liveWeight;
-        uint256 lastIndex = len - 1;
-        uint256[] memory weights = new uint256[](len);
-        bool[] memory burned = new bool[](len);
+        weights = new uint256[](len);
+        owners = new address[](len);
 
+        for (uint256 i = 0; i < len; i++) {
+            (uint256 w, address ownerNow) = _componentWeight(buildIds[i], payer, complexity);
+            weights[i] = w;
+            owners[i] = ownerNow;
+            totalWeight += w;
+            if (ownerNow != address(0)) {
+                hasLive = true;
+            }
+        }
+    }
+
+    function _validateCounts(uint256[] calldata buildIds, uint256[] calldata counts)
+        internal
+        pure
+        returns (uint256 totalCount)
+    {
+        uint256 len = buildIds.length;
         for (uint256 i = 0; i < len; i++) {
             if (i > 0) {
                 require(buildIds[i] > buildIds[i - 1], "not sorted");
             }
             require(counts[i] > 0, "count=0");
-
-            uint256 buildId = buildIds[i];
-            if (!IBuildNFTView(buildNFT).isActive(buildId)) {
-                burned[i] = true;
-                weights[i] = 1;
-                totalWeight += 1;
-                continue;
-            }
-
-            if (!hasUsed[buildId][payer]) {
-                hasUsed[buildId][payer] = true;
-                uniqueUsers[buildId] += 1;
-            }
-
-            uint256 lockedBlox = IBuildNFTView(buildNFT).lockedBloxOf(buildId);
-            uint256 baseWeight = lockedBlox / 1e12;
-            if (baseWeight == 0) baseWeight = 1;
-            uint256 weight = baseWeight * (1 + uniqueUsers[buildId]);
-            weights[i] = weight;
-            totalWeight += weight;
-            liveWeight += weight;
+            totalCount += counts[i];
         }
+    }
 
-        if (liveWeight == 0) {
-            ethOwed[protocolTreasury] += msg.value;
-            emit UsageAccrued(0, payer, protocolTreasury, msg.value, false);
-            return;
-        }
-        uint256 remaining = msg.value;
-
-        for (uint256 i = 0; i < len; i++) {
-            uint256 buildId = buildIds[i];
-            uint256 amount = (msg.value * weights[i]) / totalWeight;
+    function _distribute(
+        uint256[] calldata buildIds,
+        uint256[] memory weights,
+        address[] memory owners,
+        uint256 totalWeight,
+        address payer,
+        uint256 value
+    ) internal {
+        uint256 lastIndex = buildIds.length - 1;
+        uint256 remaining = value;
+        for (uint256 i = 0; i < buildIds.length; i++) {
+            uint256 amount = (value * weights[i]) / totalWeight;
             if (i == lastIndex) {
                 amount = remaining;
             } else {
                 remaining -= amount;
             }
 
-            if (burned[i]) {
+            if (owners[i] == address(0)) {
                 ethOwed[protocolTreasury] += amount;
-                emit UsageAccrued(buildId, payer, address(0), amount, false);
+                emit UsageAccrued(buildIds[i], payer, address(0), amount, false);
             } else {
-                address ownerOfBuild = IBuildNFTView(buildNFT).ownerOf(buildId);
-                ethOwed[ownerOfBuild] += amount;
-                emit UsageAccrued(buildId, payer, ownerOfBuild, amount, false);
+                ethOwed[owners[i]] += amount;
+                emit UsageAccrued(buildIds[i], payer, owners[i], amount, false);
             }
         }
+    }
+
+    function _componentWeight(uint256 buildId, address payer, uint256 complexity)
+        internal
+        returns (uint256 weight, address ownerNow)
+    {
+        uint256 lockedBlox;
+        uint256 scoreId = buildId;
+
+        try IBuildNFTView(buildNFT).ownerOf(buildId) returns (address o) {
+            ownerNow = o;
+        } catch {
+            return (1, address(0));
+        }
+
+        try IBuildNFTView(buildNFT).bwAnchorOf(buildId) returns (uint256 anchor) {
+            if (anchor != 0) {
+                scoreId = anchor;
+            }
+        } catch {
+            // backward-compatible fallback: score by component itself
+        }
+
+        try IBuildNFTView(buildNFT).lockedBloxOf(scoreId) returns (uint256 l) {
+            lockedBlox = l;
+        } catch {
+            return (1, address(0));
+        }
+
+        if (firstSeenAt[scoreId] == 0) {
+            firstSeenAt[scoreId] = block.timestamp;
+        }
+
+        if (!hasUsed[scoreId][payer]) {
+            hasUsed[scoreId][payer] = true;
+            uniqueUsers[scoreId] += 1;
+        }
+        if (!hasBuiltWith[scoreId][payer]) {
+            hasBuiltWith[scoreId][payer] = true;
+            uniqueBuilders[scoreId] += 1;
+        }
+        uses[scoreId] += 1;
+        lastUsedAt[scoreId] = block.timestamp;
+        if (payer != ownerNow) {
+            lastNonOwnerUseAt[scoreId] = block.timestamp;
+        }
+
+        bwScore[scoreId] += _bwDelta(scoreId, lockedBlox, complexity);
+        weight = _weightFromScore(bwScore[scoreId]);
     }
 
     // -------- distribution --------

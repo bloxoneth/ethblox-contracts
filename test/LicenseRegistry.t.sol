@@ -9,11 +9,18 @@ import {LicenseNFT} from "src/LicenseNFT.sol";
 /// @dev Minimal BuildNFT stub for registry tests.
 contract MockBuildNFT {
     mapping(uint256 => address) internal _ownerOf;
+    mapping(uint256 => address) internal _creatorOf;
     mapping(uint256 => bytes32) internal _geometryOf;
     mapping(uint256 => uint256) internal _massOf;
+    mapping(uint256 => uint16) internal _densityOf;
+    mapping(uint256 => bool) internal _burned;
 
     function setOwner(uint256 tokenId, address owner) external {
         _ownerOf[tokenId] = owner;
+    }
+
+    function setCreator(uint256 tokenId, address creator) external {
+        _creatorOf[tokenId] = creator;
     }
 
     function setGeometry(uint256 tokenId, bytes32 g) external {
@@ -22,6 +29,14 @@ contract MockBuildNFT {
 
     function setMass(uint256 tokenId, uint256 m) external {
         _massOf[tokenId] = m;
+    }
+
+    function setDensity(uint256 tokenId, uint16 d) external {
+        _densityOf[tokenId] = d;
+    }
+
+    function setBurned(uint256 tokenId, bool v) external {
+        _burned[tokenId] = v;
     }
 
     function ownerOf(uint256 tokenId) external view returns (address) {
@@ -36,6 +51,10 @@ contract MockBuildNFT {
         return _geometryOf[tokenId];
     }
 
+    function creatorOf(uint256 tokenId) external view returns (address) {
+        return _creatorOf[tokenId];
+    }
+
     function isActive(uint256 tokenId) external view returns (bool) {
         return _ownerOf[tokenId] != address(0);
     }
@@ -43,15 +62,41 @@ contract MockBuildNFT {
     function massOf(uint256 tokenId) external view returns (uint256) {
         return _massOf[tokenId];
     }
+
+    function densityOf(uint256 tokenId) external view returns (uint16) {
+        return _densityOf[tokenId];
+    }
+
+    function isBurned(uint256 tokenId) external view returns (bool) {
+        return _burned[tokenId];
+    }
+}
+
+contract RebalanceRouterMock {
+    bool public shouldFail;
+    uint256 public callCount;
+    uint256 public lastValue;
+
+    function setShouldFail(bool v) external {
+        shouldFail = v;
+    }
+
+    function execute() external payable {
+        callCount += 1;
+        lastValue = msg.value;
+        require(!shouldFail, "router fail");
+    }
 }
 
 contract LicenseRegistryTest is Test {
     MockBuildNFT private build;
     LicenseNFT private licenseNFT;
     LicenseRegistry private registry;
+    RebalanceRouterMock private router;
 
     address private deployer = address(this);
     address private buildOwner = address(0xB0B);
+    address private creator = address(0xC0FFEE);
     address private buyer = address(0xA11CE);
 
     address payable private treasury = payable(address(0xBEEF));
@@ -64,10 +109,13 @@ contract LicenseRegistryTest is Test {
     function setUp() public {
         build = new MockBuildNFT();
         build.setOwner(buildId, buildOwner);
+        build.setCreator(buildId, creator);
         build.setGeometry(buildId, geo);
         build.setMass(buildId, mass);
+        build.setDensity(buildId, 1);
 
         licenseNFT = new LicenseNFT("ipfs://base/{id}.json");
+        router = new RebalanceRouterMock();
 
         // Deploy registry with treasury
         registry = new LicenseRegistry(address(build), address(licenseNFT), treasury);
@@ -116,12 +164,13 @@ contract LicenseRegistryTest is Test {
 
         // LicenseNFT maxSupply should be set
         assertEq(licenseNFT.maxSupply(licenseId), 10_000_000 / mass);
+        assertEq(licenseNFT.balanceOf(creator, licenseId), 1);
     }
 
-    function testRegisterBuildRevertsIfNotOwner() public {
+    function testRegisterBuildPermissionless() public {
         vm.prank(buyer);
-        vm.expectRevert(bytes("not owner"));
         registry.registerBuild(buildId, geo);
+        assertEq(registry.licenseIdForBuild(buildId), 1);
     }
 
     function testRegisterBuildRevertsOnGeometryMismatch() public {
@@ -140,10 +189,10 @@ contract LicenseRegistryTest is Test {
     }
 
     function testRegisterBuildRevertsIfBurned() public {
-        build.setOwner(buildId, address(0));
+        build.setBurned(buildId, true);
 
         vm.prank(buildOwner);
-        vm.expectRevert(bytes("inactive build"));
+        vm.expectRevert(bytes("build burned"));
         registry.registerBuild(buildId, geo);
     }
 
@@ -164,11 +213,12 @@ contract LicenseRegistryTest is Test {
         (uint256 startPrice, uint256 step,,) = registry.pricingForLicense(licenseId);
 
         uint256 q = registry.quote(buildId, 3);
-        uint256 expected = ((startPrice * 2 + (2 * step)) * 3) / 2;
+        uint256 start = startPrice + step; // creator receives first seeded license at registration
+        uint256 expected = ((start * 2 + (2 * step)) * 3) / 2;
         assertEq(q, expected);
     }
 
-    function testMintLicenseForBuildMintsAndForwardsETH() public {
+    function testMintLicenseForBuildMintsAndSplitsETH() public {
         vm.prank(buildOwner);
         registry.registerBuild(buildId, geo);
 
@@ -176,15 +226,19 @@ contract LicenseRegistryTest is Test {
         uint256 price = registry.quote(buildId, 2);
 
         uint256 treasuryBefore = treasury.balance;
+        uint256 lpBefore = registry.lpBudgetBalance();
 
         vm.prank(buyer);
         registry.mintLicenseForBuild{value: price}(buildId, 2);
 
         // Buyer received ERC1155 licenses
         assertEq(licenseNFT.balanceOf(buyer, licenseId), 2);
+        assertEq(licenseNFT.balanceOf(creator, licenseId), 1);
 
-        // ETH forwarded to treasury
-        assertEq(treasury.balance, treasuryBefore + price);
+        uint256 expectedLp = price / 2;
+        uint256 expectedTreasury = price - expectedLp;
+        assertEq(treasury.balance, treasuryBefore + expectedTreasury);
+        assertEq(registry.lpBudgetBalance(), lpBefore + expectedLp);
     }
 
     function testMintLicenseForBuildRevertsOnBadPrice() public {
@@ -198,26 +252,134 @@ contract LicenseRegistryTest is Test {
         registry.mintLicenseForBuild{value: price - 1}(buildId, 2);
     }
 
-    function testMintLicenseForBuildRevertsIfNotRegistered() public {
+    function testMintLicenseForBuildAutoRegistersOnFirstAttempt() public {
+        uint256 price = registry.quote(buildId, 1);
+        assertEq(registry.licenseIdForBuild(buildId), 0);
+
         vm.prank(buyer);
-        vm.expectRevert(bytes("not registered"));
-        registry.mintLicenseForBuild{value: 1 ether}(buildId, 1);
+        registry.mintLicenseForBuild{value: price}(buildId, 1);
+
+        uint256 licenseId = registry.licenseIdForBuild(buildId);
+        assertTrue(licenseId > 0);
+        assertEq(licenseNFT.balanceOf(buyer, licenseId), 1);
+        assertEq(licenseNFT.balanceOf(creator, licenseId), 1);
     }
 
     function testMintLicenseForBuildRevertsIfBurned() public {
         vm.prank(buildOwner);
         registry.registerBuild(buildId, geo);
 
-        build.setOwner(buildId, address(0));
+        build.setBurned(buildId, true);
 
         uint256 price = registry.quote(buildId, 1);
         vm.prank(buyer);
-        vm.expectRevert(bytes("inactive build"));
+        vm.expectRevert(bytes("build burned"));
         registry.mintLicenseForBuild{value: price}(buildId, 1);
     }
 
-    function testQuoteRevertsIfNotRegistered() public {
-        vm.expectRevert(bytes("not registered"));
-        registry.quote(buildId, 1);
+    function testQuoteWorksBeforeRegistration() public {
+        uint256 q = registry.quote(buildId, 1);
+        assertTrue(q > 0);
+    }
+
+    function testRegisterBuildDensityAwareSupply() public {
+        build.setDensity(buildId, 8);
+        vm.prank(buildOwner);
+        registry.registerBuild(buildId, geo);
+        uint256 licenseId = registry.licenseIdForBuild(buildId);
+        (, , uint256 maxSupply,) = registry.pricingForLicense(licenseId);
+        assertEq(maxSupply, 10_000_000 / (mass * 8));
+    }
+
+    function testRebalanceGuards_Interval() public {
+        vm.prank(buildOwner);
+        registry.registerBuild(buildId, geo);
+        uint256 price = registry.quote(buildId, 1);
+        vm.prank(buyer);
+        registry.mintLicenseForBuild{value: price}(buildId, 1);
+
+        registry.setRouterWhitelist(address(router), true);
+        registry.setRebalanceGuards(1 hours, 1, 100, 10 minutes);
+        vm.warp(block.timestamp + 1 hours + 1);
+
+        (bool ok,) = registry.executeRebalance(
+            address(router), 1, 100, block.timestamp + 1 minutes, abi.encodeCall(router.execute, ())
+        );
+        assertTrue(ok);
+
+        vm.expectRevert(bytes("interval"));
+        registry.executeRebalance(
+            address(router), 1, 100, block.timestamp + 1 minutes, abi.encodeCall(router.execute, ())
+        );
+    }
+
+    function testRebalanceGuards_Threshold() public {
+        vm.prank(buildOwner);
+        registry.registerBuild(buildId, geo);
+        uint256 price = registry.quote(buildId, 1);
+        vm.prank(buyer);
+        registry.mintLicenseForBuild{value: price}(buildId, 1);
+
+        registry.setRouterWhitelist(address(router), true);
+        registry.setRebalanceGuards(0, 1 ether, 100, 10 minutes);
+
+        vm.expectRevert(bytes("threshold"));
+        registry.executeRebalance(
+            address(router), 1, 100, block.timestamp + 1 minutes, abi.encodeCall(router.execute, ())
+        );
+    }
+
+    function testRebalanceGuards_Whitelist() public {
+        vm.prank(buildOwner);
+        registry.registerBuild(buildId, geo);
+        uint256 price = registry.quote(buildId, 1);
+        vm.prank(buyer);
+        registry.mintLicenseForBuild{value: price}(buildId, 1);
+
+        registry.setRebalanceGuards(0, 1, 100, 10 minutes);
+        vm.expectRevert(bytes("router"));
+        registry.executeRebalance(
+            address(router), 1, 100, block.timestamp + 1 minutes, abi.encodeCall(router.execute, ())
+        );
+    }
+
+    function testRebalanceGuards_SlippageAndDeadline() public {
+        vm.prank(buildOwner);
+        registry.registerBuild(buildId, geo);
+        uint256 price = registry.quote(buildId, 1);
+        vm.prank(buyer);
+        registry.mintLicenseForBuild{value: price}(buildId, 1);
+
+        registry.setRouterWhitelist(address(router), true);
+        registry.setRebalanceGuards(0, 1, 100, 10 minutes);
+
+        vm.expectRevert(bytes("slippage"));
+        registry.executeRebalance(
+            address(router), 1, 101, block.timestamp + 1 minutes, abi.encodeCall(router.execute, ())
+        );
+
+        vm.expectRevert(bytes("deadline"));
+        registry.executeRebalance(
+            address(router), 1, 100, block.timestamp + 11 minutes, abi.encodeCall(router.execute, ())
+        );
+    }
+
+    function testRebalanceFailureKeepsLpBudget() public {
+        vm.prank(buildOwner);
+        registry.registerBuild(buildId, geo);
+        uint256 price = registry.quote(buildId, 1);
+        vm.prank(buyer);
+        registry.mintLicenseForBuild{value: price}(buildId, 1);
+
+        registry.setRouterWhitelist(address(router), true);
+        registry.setRebalanceGuards(0, 1, 100, 10 minutes);
+        router.setShouldFail(true);
+
+        uint256 lpBefore = registry.lpBudgetBalance();
+        (bool ok,) = registry.executeRebalance(
+            address(router), 1, 100, block.timestamp + 1 minutes, abi.encodeCall(router.execute, ())
+        );
+        assertFalse(ok);
+        assertEq(registry.lpBudgetBalance(), lpBefore);
     }
 }

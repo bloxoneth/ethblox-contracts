@@ -5,9 +5,12 @@ import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
 
 interface IBuildNFT {
     function ownerOf(uint256 tokenId) external view returns (address);
+    function creatorOf(uint256 tokenId) external view returns (address);
     function geometryOf(uint256 tokenId) external view returns (bytes32);
     function isActive(uint256 tokenId) external view returns (bool);
     function massOf(uint256 tokenId) external view returns (uint256);
+    function densityOf(uint256 tokenId) external view returns (uint16);
+    function isBurned(uint256 tokenId) external view returns (bool);
 }
 
 interface ILicenseNFT {
@@ -30,8 +33,15 @@ contract LicenseRegistry is Ownable {
     address public buildNFT;
     address public licenseNFT;
 
-    // NEW: where license ETH goes
     address public treasury;
+    uint256 public lpBudgetBalance;
+    uint256 public minRebalanceInterval;
+    uint256 public minLpBudgetAmount;
+    uint256 public maxSlippageBps;
+    uint256 public maxDeadlineWindow;
+    uint256 public lastRebalanceAt;
+    mapping(address => bool) public keepers;
+    mapping(address => bool) public routerWhitelist;
 
     uint256 public nextLicenseId = 1;
 
@@ -39,6 +49,15 @@ contract LicenseRegistry is Ownable {
     mapping(uint256 => Pricing) public pricingForLicense;
 
     event TreasurySet(address indexed treasury);
+    event KeeperSet(address indexed keeper, bool allowed);
+    event RouterWhitelistSet(address indexed router, bool allowed);
+    event RebalanceGuardsSet(
+        uint256 minRebalanceInterval,
+        uint256 minLpBudgetAmount,
+        uint256 maxSlippageBps,
+        uint256 maxDeadlineWindow
+    );
+    event RebalanceExecuted(address indexed keeper, address indexed router, uint256 amount, bool ok);
 
     event BuildRegistered(
         uint256 indexed buildId,
@@ -59,58 +78,104 @@ contract LicenseRegistry is Ownable {
         buildNFT = buildNFT_;
         licenseNFT = licenseNFT_;
         treasury = treasury_;
+        keepers[msg.sender] = true;
+        minRebalanceInterval = 1 hours;
+        maxSlippageBps = 1_000;
+        maxDeadlineWindow = 30 minutes;
 
         emit TreasurySet(treasury_);
+        emit KeeperSet(msg.sender, true);
     }
 
-    // NEW: editable treasury
+    receive() external payable {}
+
     function setTreasury(address treasury_) external onlyOwner {
         require(treasury_ != address(0), "treasury=0");
         treasury = treasury_;
         emit TreasurySet(treasury_);
     }
 
+    function setKeeper(address keeper, bool allowed) external onlyOwner {
+        require(keeper != address(0), "keeper=0");
+        keepers[keeper] = allowed;
+        emit KeeperSet(keeper, allowed);
+    }
+
+    function setRouterWhitelist(address router, bool allowed) external onlyOwner {
+        require(router != address(0), "router=0");
+        routerWhitelist[router] = allowed;
+        emit RouterWhitelistSet(router, allowed);
+    }
+
+    function setRebalanceGuards(
+        uint256 minRebalanceInterval_,
+        uint256 minLpBudgetAmount_,
+        uint256 maxSlippageBps_,
+        uint256 maxDeadlineWindow_
+    ) external onlyOwner {
+        require(maxSlippageBps_ <= 10_000, "slippage");
+        require(maxDeadlineWindow_ > 0, "deadline");
+        minRebalanceInterval = minRebalanceInterval_;
+        minLpBudgetAmount = minLpBudgetAmount_;
+        maxSlippageBps = maxSlippageBps_;
+        maxDeadlineWindow = maxDeadlineWindow_;
+        emit RebalanceGuardsSet(
+            minRebalanceInterval_, minLpBudgetAmount_, maxSlippageBps_, maxDeadlineWindow_
+        );
+    }
+
+    function executeRebalance(
+        address router,
+        uint256 amount,
+        uint256 slippageBps,
+        uint256 deadline,
+        bytes calldata data
+    ) external returns (bool ok, bytes memory result) {
+        require(keepers[msg.sender], "keeper");
+        require(routerWhitelist[router], "router");
+        require(block.timestamp >= lastRebalanceAt + minRebalanceInterval, "interval");
+        require(amount >= minLpBudgetAmount, "threshold");
+        require(amount <= lpBudgetBalance, "lp budget");
+        require(slippageBps <= maxSlippageBps, "slippage");
+        require(
+            deadline >= block.timestamp && deadline <= block.timestamp + maxDeadlineWindow, "deadline"
+        );
+
+        lpBudgetBalance -= amount;
+        (ok, result) = router.call{value: amount}(data);
+        if (ok) {
+            lastRebalanceAt = block.timestamp;
+        } else {
+            lpBudgetBalance += amount;
+        }
+        emit RebalanceExecuted(msg.sender, router, amount, ok);
+    }
+
     function registerBuild(uint256 buildId, bytes32 expectedGeometryHash) external {
         require(licenseIdForBuild[buildId] == 0, "already registered");
-        require(IBuildNFT(buildNFT).isActive(buildId), "inactive build");
-        require(IBuildNFT(buildNFT).ownerOf(buildId) == msg.sender, "not owner");
         require(
             IBuildNFT(buildNFT).geometryOf(buildId) == expectedGeometryHash, "geometry mismatch"
         );
-        uint256 mass = IBuildNFT(buildNFT).massOf(buildId);
-        require(mass > 0, "mass=0");
-
-        uint256 maxSupply = 10_000_000 / mass;
-        require(maxSupply > 0, "max=0");
-
-        (uint256 startPriceWei, uint256 maxPriceWei) = _pricingForMaxSupply(maxSupply);
-        uint256 stepWei = maxSupply > 1 ? (maxPriceWei - startPriceWei) / (maxSupply - 1) : 0;
-
-        uint256 licenseId = nextLicenseId++;
-        licenseIdForBuild[buildId] = licenseId;
-        pricingForLicense[licenseId] =
-            Pricing({
-                startPrice: startPriceWei,
-                step: stepWei,
-                maxSupply: maxSupply,
-                maxPrice: maxPriceWei
-            });
-
-        ILicenseNFT(licenseNFT).setMaxSupply(licenseId, maxSupply);
-
-        emit BuildRegistered(buildId, licenseId, maxSupply, startPriceWei, stepWei);
+        _registerBuild(buildId);
     }
 
     function quote(uint256 buildId, uint256 qty) external view returns (uint256) {
         uint256 licenseId = licenseIdForBuild[buildId];
-        require(licenseId != 0, "not registered");
-        return _quoteForLicense(licenseId, qty);
+        if (licenseId != 0) {
+            return _quoteForLicense(licenseId, qty);
+        }
+        (Pricing memory pricing,) = _pricingForBuild(buildId);
+        return _quoteFromPricing(pricing, _initialSoldForBuild(buildId), qty);
     }
 
     function mintLicenseForBuild(uint256 buildId, uint256 qty) external payable {
         uint256 licenseId = licenseIdForBuild[buildId];
-        require(licenseId != 0, "not registered");
-        require(IBuildNFT(buildNFT).isActive(buildId), "inactive build");
+        if (licenseId == 0) {
+            licenseId = _registerBuild(buildId);
+        } else {
+            require(!IBuildNFT(buildNFT).isBurned(buildId), "build burned");
+            require(IBuildNFT(buildNFT).isActive(buildId), "inactive build");
+        }
 
         uint256 price = _quoteForLicense(licenseId, qty);
         require(msg.value == price, "bad price");
@@ -123,24 +188,83 @@ contract LicenseRegistry is Ownable {
 
         ILicenseNFT(licenseNFT).mint(msg.sender, licenseId, qty);
 
-        // NEW: forward ETH to treasury immediately
-        (bool ok,) = treasury.call{value: msg.value}("");
+        uint256 lpAmount = msg.value / 2;
+        uint256 treasuryAmount = msg.value - lpAmount;
+        lpBudgetBalance += lpAmount;
+        (bool ok,) = treasury.call{value: treasuryAmount}("");
         require(ok, "treasury xfer");
 
         emit LicenseMinted(licenseId, msg.sender, qty, price);
     }
 
+    function _registerBuild(uint256 buildId) internal returns (uint256 licenseId) {
+        require(licenseIdForBuild[buildId] == 0, "already registered");
+        (Pricing memory pricing, uint256 maxSupply) = _pricingForBuild(buildId);
+
+        licenseId = nextLicenseId++;
+        licenseIdForBuild[buildId] = licenseId;
+        pricingForLicense[licenseId] = pricing;
+
+        ILicenseNFT(licenseNFT).setMaxSupply(licenseId, maxSupply);
+        address creator = IBuildNFT(buildNFT).creatorOf(buildId);
+        if (creator != address(0)) {
+            ILicenseNFT(licenseNFT).mint(creator, licenseId, 1);
+        }
+
+        emit BuildRegistered(buildId, licenseId, maxSupply, pricing.startPrice, pricing.step);
+    }
+
     function _quoteForLicense(uint256 licenseId, uint256 qty) internal view returns (uint256) {
-        require(qty > 0, "qty=0");
         Pricing memory pricing = pricingForLicense[licenseId];
         require(pricing.maxSupply > 0, "pricing=0");
         uint256 sold = ILicenseNFT(licenseNFT).totalSupply(licenseId);
+        return _quoteFromPricing(pricing, sold, qty);
+    }
+
+    function _quoteFromPricing(Pricing memory pricing, uint256 sold, uint256 qty)
+        internal
+        pure
+        returns (uint256)
+    {
+        require(qty > 0, "qty=0");
         require(sold + qty <= pricing.maxSupply, "max exceeded");
 
         uint256 start = pricing.startPrice + (sold * pricing.step);
         uint256 nMinusOne = qty - 1;
         uint256 series = (start * 2 + (nMinusOne * pricing.step)) * qty;
         return series / 2;
+    }
+
+    function _pricingForBuild(uint256 buildId)
+        internal
+        view
+        returns (Pricing memory pricing, uint256 maxSupply)
+    {
+        require(!IBuildNFT(buildNFT).isBurned(buildId), "build burned");
+        require(IBuildNFT(buildNFT).isActive(buildId), "inactive build");
+        IBuildNFT(buildNFT).ownerOf(buildId);
+
+        uint256 mass = IBuildNFT(buildNFT).massOf(buildId);
+        require(mass > 0, "mass=0");
+        uint256 density = IBuildNFT(buildNFT).densityOf(buildId);
+        require(density > 0, "density=0");
+
+        uint256 massWithDensity = mass * density;
+        maxSupply = 10_000_000 / massWithDensity;
+        require(maxSupply > 0, "max=0");
+
+        (uint256 startPriceWei, uint256 maxPriceWei) = _pricingForMaxSupply(maxSupply);
+        uint256 stepWei = maxSupply > 1 ? (maxPriceWei - startPriceWei) / (maxSupply - 1) : 0;
+        pricing = Pricing({
+            startPrice: startPriceWei,
+            step: stepWei,
+            maxSupply: maxSupply,
+            maxPrice: maxPriceWei
+        });
+    }
+
+    function _initialSoldForBuild(uint256 buildId) internal view returns (uint256) {
+        return IBuildNFT(buildNFT).creatorOf(buildId) == address(0) ? 0 : 1;
     }
 
     function _pricingForMaxSupply(uint256 maxSupply)
